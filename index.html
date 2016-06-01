@@ -1,0 +1,188 @@
+<link href="css/normalize.css" rel="stylesheet" />
+<link href="css/skeleton.css" rel="stylesheet" />
+
+<style>
+body { padding: 0; margin: 0; }
+#app { width: 100%; height: 100%; }
+#top { width: 100%; height: 60px; }
+#map { width: 100%; height: calc(100% - 60px); }
+#world, #chart { position: absolute; }
+#chart { display: none; }
+#sub { float: right; margin: 10px; }
+#scale { float: right; margin: 10px; }
+
+.top { margin: 10px; }
+.section rect { stroke: white; stroke-width: 1px; }
+.section text { font-size: 12px; }
+path { stroke: white; }
+</style>
+
+<div id="app">
+    <div id="top">
+        <button class="top" onclick="mapStart();">Corp Tax Rate</button>
+        <button class="top" onclick="chartStart();">Apple Investigation</button>
+        <button class="top" onclick="panaStart();">Panama Mossack Fonseca</button>
+        <div id="sub"></div>
+        <svg id="scale"></svg>
+    </div>
+    <div id="map">
+        <svg id="world" />
+        <svg id="chart" />
+    </div>
+</div>
+<script src="ext/d3.v3.min.js"></script>
+<script src="ext/topojson.v1.min.js"></script>
+<!--<script src="main.js"></script>-->
+
+<script>
+var map = d3.select('#map');
+var w = map.style("width");
+var h = map.style("height");
+var width = parseInt(w.substr(0, w.length - 2), 10);
+var height = parseInt(h.substr(0, h.length - 2), 10);
+var rotate = 60;        // so that [-60, 0] becomes initial center of projection
+var maxlat = 83;
+
+var projection = d3.geo.mercator().rotate([rotate,0]).scale(1).translate([width/2, height/2]);
+
+// find the top left and bottom right of current projection
+function mercatorBounds(projection, maxlat) {
+    var yaw = projection.rotate()[0],
+    xymax = projection([-yaw+180-1e-6,-maxlat]),
+    xymin = projection([-yaw-180+1e-6, maxlat]);
+
+    return [xymin,xymax];
+}
+
+var b = mercatorBounds(projection, maxlat),
+    s = width/(b[1][0]-b[0][0]),
+    scaleExtent = [s, 10*s];
+
+projection.scale(scaleExtent[0]);
+
+var zoom = d3.behavior.zoom().scaleExtent(scaleExtent).scale(projection.scale()).translate([0,0]).on("zoom", redraw);
+var path = d3.geo.path().projection(projection);
+var svg = d3.select('#world').attr('width',width).attr('height',height).call(zoom);
+
+d3.json("/ext/world-110m2.json", function ready(error, world) {
+    d3.tsv('/ext/world-country-names.tsv', function (error, names) {
+        window.world = world;
+        var countries = topojson.feature(world, world.objects.countries).features;
+        countries = countries.filter(function(d) {
+            return names.some(function(n) {
+                if (d.id == n.id) return d.name = n.name;
+            });
+        });
+        countries.forEach( c => c.color = '#AAA' );
+        svg.selectAll('path')
+            .data(countries)
+            .enter().append('path');
+
+        redraw();       // update path data
+    });
+});
+
+// track last translation and scale event we processed
+var tlast = [0,0], 
+    slast = null;
+
+function redraw() {
+    if (d3.event) { 
+        var scale = d3.event.scale,
+            t = d3.event.translate;                
+
+        // if scaling changes, ignore translation (otherwise touch zooms are weird)
+        if (scale != slast) {
+            projection.scale(scale);
+        } else {
+            var dx = t[0]-tlast[0],
+                dy = t[1]-tlast[1],
+                yaw = projection.rotate()[0],
+                tp = projection.translate();
+
+                // use x translation to rotate based on current scale
+                projection.rotate([yaw+360.*dx/width*scaleExtent[0]/scale, 0, 0]);
+                // use y translation to translate projection, clamped by min/max
+                var b = mercatorBounds(projection, maxlat);
+                if (b[0][1] + dy > 0) dy = -b[0][1];
+                else if (b[1][1] + dy < height) dy = height-b[1][1];
+                projection.translate([tp[0],tp[1]+dy]);
+        }
+        // save last values.  resetting zoom.translate() and scale() would
+        // seem equivalent but doesn't seem to work reliably?
+        slast = scale;
+        tlast = t;
+    }
+
+    svg.selectAll('path')       // re-project path data
+        .attr('d', path)
+        .attr('fill', function (d) {
+            return countryColor(d.name);
+        });
+}
+ 
+var corp2012 = [];
+var countryColor = () => '#AAA';
+var taxScale = d3.scale.linear().domain([0, 0]).range(['#AAA', '#AAA']);
+d3.json('/ext/corp2012.json', function (error, data) { 
+    corp2012 = data; 
+    var max = d3.max(data, d => parseInt(d.val, 10));
+    taxScale.domain([0, max/2, max]).range(['#e0ecf4', '#9ebcda', '#8856a7']);
+});
+
+// chart stuff
+var chart = d3.select('#chart');
+
+function makeDropdown(items, handler) {
+    d3.select('#sub').selectAll('*').remove();
+    d3.select('#sub').append('select').on('change', handler)
+        .selectAll('option').data(items).enter().append('option').attr('value', d => d ).text( d => d );
+
+    d3.select('#sub select').node().focus();
+}
+
+function makeScale(scale) {
+    var svg = d3.select('#scale');
+    svg.selectAll('*').remove();
+    if (!scale) return;
+
+    svg.attr('width', '200px').attr('height', '40px');
+    var defs = svg.append('defs').append('linearGradient').attr('id', 'gradient').attr('x1', '0%').attr('x2', '100%').attr('y1', '0%').attr('y2', '0%');
+    defs.append('stop').attr('offset', '0%').attr('style', 'stop-color:' + scale.range()[0] + '; stop-opacity:1;');
+    defs.append('stop').attr('offset', '50%').attr('style', 'stop-color:' + scale.range()[1] + '; stop-opacity:1;');
+    defs.append('stop').attr('offset', '100%').attr('style', 'stop-color:' + scale.range()[2] + '; stop-opacity:1;');
+
+    svg.append('rect').attr('width', 200).attr('height', 40).attr('fill', 'url(#gradient)');
+    svg.append('text').text(scale.domain()[2]).attr('x', 190).attr('y', 25).attr('text-anchor', 'end').attr('fill', 'white');
+}
+
+function chartStart() {
+    svg.style('display', 'none');
+    chart.style('display', 'block');
+
+    makeDropdown(chartSteps.map( s => s.name ), () => renderChartStep(chartSteps.find( s => s.name === d3.event.target.value )) );
+}
+
+function mapStart() {
+    chart.style('display', 'none');
+    svg.style('display', 'block');
+
+    countryColor = function (name) {
+        var corp = corp2012.find( c => c.id === name );
+        return corp ? taxScale(corp.val) : '#EEE';
+    };
+    redraw();
+    makeScale(taxScale);    
+}
+
+function panaStart() {
+    chart.style('display', 'none');
+    svg.style('display', 'block');
+
+    makeDropdown(['Clients', 'Middlemen', 'Tax Havens'], dropdownHandler);
+}
+
+</script>
+
+<script src="chart.js"></script>
+<script src="pana.js"></script>
